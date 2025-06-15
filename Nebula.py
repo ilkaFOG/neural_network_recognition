@@ -6,6 +6,7 @@ import datetime
 import torch
 import pygame
 import warnings
+import hid
 from torchvision import transforms, models
 from PIL import Image
 from torch import nn
@@ -38,16 +39,21 @@ os.environ.update({
 class GameWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        # Инициализация Pygame для работы с джойстиком
         pygame.init()
-        pygame.joystick.init()  
+        pygame.joystick.init()
+        
         self.control_mode = "Ручной"
         self.camera = None
         self.current_source = None
         self.timer = QTimer()
+        self.joystick = None
+        self.joystick_name = "Не подключен"
         
         self._setup_ui()
         self._setup_connections()
         self._initialize_app()
+        self._init_joystick()
 
         self.joystick_timer = QTimer()
         self.left_joystick_pos = QPoint(0, 0)
@@ -60,10 +66,72 @@ class GameWindow(QMainWindow):
         warnings.filterwarnings("ignore", category=UserWarning, module="pkg_resources")
         warnings.filterwarnings("ignore", module="pygame")
 
+        self.options_button_id = 9  # Идентификатор кнопки Options на джойстике
+        self.menu_shown = False     # Флаг для отслеживания состояния меню
+        self.current_menu_item = 0  # Текущий выбранный пункт меню
+        self.menu_items = []        # Список пунктов меню
+        self.last_hat_pos = (0, 0)  # Последнее положение HAT (крестовины)
+        self.menu_navigation_enabled = False  # Флаг для навигации по меню
+
     # Конфигурация нейросети
     NUM_CLASSES = 3  # Количество классов дефектов
     CLASS_NAMES = ["Норма", "Трещина", "Коррозия"]  # Пример классификации
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def _handle_menu_navigation(self):
+        """Обработка навигации по меню с помощью джойстика"""
+        if not self.menu_shown or not hasattr(self, 'options_menu'):
+            return
+        
+        try:
+            # Получаем состояние HAT (крестовины)
+            hat_pos = self.joystick.get_hat(0) if self.joystick.get_numhats() > 0 else (0, 0)
+            
+            # Определяем направление движения
+            if hat_pos != self.last_hat_pos:
+                if hat_pos[1] == 1:  # Вверх
+                    self._move_menu_selection(-1)
+                elif hat_pos[1] == -1:  # Вниз
+                    self._move_menu_selection(1)
+                elif hat_pos[0] == 1:  # Вправо (для подменю)
+                    if self.options_menu.activeAction() and self.options_menu.activeAction().menu():
+                        self.options_menu.activeAction().menu().popup(self.options_menu.pos())
+                elif hat_pos[0] == -1:  # Влево (выход из подменю)
+                    if self.options_menu.activeAction() and self.options_menu.activeAction().menu():
+                        self.options_menu.setActiveAction(None)
+                
+                self.last_hat_pos = hat_pos
+            
+            # Проверка нажатия кнопки выбора (обычно кнопка A)
+            if self.joystick.get_button(0):  # Кнопка A (обычно 0)
+                if self.options_menu.activeAction():
+                    self.options_menu.activeAction().trigger()
+        
+        except Exception as e:
+            print(f"Ошибка навигации по меню: {e}")
+
+    def _move_menu_selection(self, direction):
+        """Перемещение выбора по меню"""
+        if not hasattr(self, 'options_menu'):
+            return
+        
+        actions = self.options_menu.actions()
+        if not actions:
+            return
+        
+        current_index = -1
+        if self.options_menu.activeAction():
+            current_index = actions.index(self.options_menu.activeAction())
+        
+        new_index = current_index + direction
+        
+        # Проверка границ
+        if new_index < 0:
+            new_index = len(actions) - 1
+        elif new_index >= len(actions):
+            new_index = 0
+        
+        self.options_menu.setActiveAction(actions[new_index])
 
     def _setup_ui(self):
         """Настройка пользовательского интерфейса"""
@@ -71,9 +139,53 @@ class GameWindow(QMainWindow):
         self._set_window_icon()
         self._apply_styles()
         
+        # Создаем кнопку Options
+        options_button = QToolButton()
+        options_button.setText("Options")
+        options_button.setStyleSheet("""
+            QToolButton {
+                color: white;
+                background-color: rgba(26, 26, 26, 150);
+                padding: 5px;
+                border: none;
+                border-radius: 3px;
+            }
+            QToolButton:hover {
+                background-color: rgba(51, 51, 51, 150);
+            }
+        """)
+        options_button.setPopupMode(QToolButton.InstantPopup)
+        
+        # Создаем меню для кнопки Options
+        options_menu = QMenu(self)
+        
+        # Добавляем подменю "Фон"
+        bg_menu = options_menu.addMenu('Фон')
+        bg_menu.addAction(self._create_action('Статичный фон', self.set_static_background))
+        bg_menu.addAction(self._create_action('Локальная камера', self.set_camera_background))
+        bg_menu.addAction(self._create_action('BeagleBone Stream', self.set_beaglebone_stream))
+        
+        # Добавляем подменю "Управление"
+        control_menu = options_menu.addMenu('Управление')
+        self.control_group = QActionGroup(self)
+        
+        modes = [('Автоматический', "Автоматический"), ('Ручной', "Ручной")]
+        for text, mode in modes:
+            action = self._create_action(text, lambda checked, m=mode: self.set_control_mode(m), True)
+            self.control_group.addAction(action)
+            control_menu.addAction(action)
+            if mode == "Ручной":
+                action.setChecked(True)
+        
+        # Добавляем пункт "Нейросеть"
+        options_menu.addAction(self._create_action("Распознать дефект", self.set_neural_network))
+        
+        # Связываем меню с кнопкой
+        options_button.setMenu(options_menu)
+        
         # Создаем кнопку закрытия
         close_button = QToolButton()
-        close_button.setIcon(QIcon.fromTheme("window-close"))  # Системная иконка закрытия
+        close_button.setIcon(QIcon.fromTheme("window-close"))
         close_button.setStyleSheet("""
             QToolButton {
                 border: none;
@@ -87,14 +199,15 @@ class GameWindow(QMainWindow):
         close_button.clicked.connect(self.close)
         close_button.setToolTip("Закрыть приложение")
         
-        # Создаем контейнер для кнопки
-        close_widget = QWidget()
-        close_layout = QHBoxLayout(close_widget)
-        close_layout.setContentsMargins(0, 0, 10, 0)  # Отступ справа
-        close_layout.addWidget(close_button)
+        # Создаем контейнер для кнопок
+        buttons_widget = QWidget()
+        buttons_layout = QHBoxLayout(buttons_widget)
+        buttons_layout.setContentsMargins(0, 0, 10, 0)
+        buttons_layout.addWidget(options_button)
+        buttons_layout.addWidget(close_button)
         
-        # Добавляем кнопку в правый верхний угол
-        self.menuBar().setCornerWidget(close_widget, Qt.TopRightCorner)
+        # Добавляем кнопки в правый верхний угол
+        self.menuBar().setCornerWidget(buttons_widget, Qt.TopRightCorner)
         
         # Остальная часть UI
         central_widget = QWidget()
@@ -106,11 +219,12 @@ class GameWindow(QMainWindow):
         self.crosshair_label = QLabel(self.background_label, alignment=Qt.AlignCenter)
         self.layout.addWidget(self.background_label)
         
-        self._create_menu()
+        # Удаляем старый метод создания меню, так как теперь используем кнопку Options
+        # self._create_menu()
 
         # Создаем отдельный QLabel для джойстиков поверх всех элементов
         self.joystick_overlay = QLabel(self)
-        self.joystick_overlay.setAttribute(Qt.WA_TransparentForMouseEvents)  # Пропускает события мыши
+        self.joystick_overlay.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.joystick_overlay.resize(self.size())
         self.joystick_overlay.move(0, 0)
         self.joystick_overlay.show()
@@ -139,37 +253,19 @@ class GameWindow(QMainWindow):
             QMenuBar { background-color: #1a1a1a; color: white; }
             QMenuBar::item { background-color: transparent; }
             QMenuBar::item:selected { background-color: #333; }
-            QMenu { background-color: black; color: white; border: 1px solid #444; }
-            QMenu::item:selected { background-color: #333; }
+            QMenu { 
+                background-color: black; 
+                color: white; 
+                border: 1px solid #444;
+            }
+            QMenu::item:selected { 
+                background-color: #333;
+                color: #fff;
+                font-weight: bold;
+            }
             QAction { color: white; }
             QToolButton:hover { background-color: #333; }
         """)
-
-    def _create_menu(self):
-        """Создание меню приложения"""
-        menubar = self.menuBar()
-        
-        bg_menu = menubar.addMenu('Фон')
-        bg_menu.addAction(self._create_action('Статичный фон', self.set_static_background))
-        bg_menu.addAction(self._create_action('Локальная камера', self.set_camera_background))
-        bg_menu.addAction(self._create_action('BeagleBone Stream', self.set_beaglebone_stream))
-        
-        control_menu = menubar.addMenu('Управление')
-        self.control_group = QActionGroup(self)
-        
-        modes = [('Автоматический', "Автоматический"), ('Ручной', "Ручной")]
-        for text, mode in modes:
-            action = self._create_action(text, lambda checked, m=mode: self.set_control_mode(m), True)
-            self.control_group.addAction(action)
-            control_menu.addAction(action)
-            if mode == "Ручной":  # Выбираем ручной режим по умолчанию
-                action.setChecked(True)
-
-        neural_network = menubar.addMenu('Нейросеть')
-        neural_action = self._create_action("Распознать дефект", self.set_neural_network)
-        neural_network.addAction(neural_action)
-        
-        # menubar.addAction(self._create_action('Выход', self.close))
 
     def _create_action(self, text, callback, checkable=False):
         """Фабрика действий меню"""
@@ -186,6 +282,30 @@ class GameWindow(QMainWindow):
             "Режим управления",
             f"Режим изменён на: {mode}"
         )
+
+    def _init_hid_device(self):
+        """Инициализация HID устройства"""
+        try:
+            # Открываем устройство по пути
+            self.hid_device = hid.device()
+            self.hid_device.open_path('/dev/hidraw4')
+            self.hid_device.set_nonblocking(1)  # Неблокирующий режим
+            print("Успешно подключено к HID устройству")
+        except Exception as e:
+            print(f"Ошибка подключения к HID устройству: {e}")
+            self.hid_device = None
+
+    def _init_joystick(self):
+        """Инициализация джойстика через Pygame"""
+        joystick_count = pygame.joystick.get_count()
+        if joystick_count > 0:
+            self.joystick = pygame.joystick.Joystick(0)
+            self.joystick.init()
+            self.joystick_name = self.joystick.get_name()
+            print(f"Подключен джойстик: {self.joystick_name}")
+        else:
+            self.joystick_name = "Не подключен"
+            print("Джойстик не обнаружен")        
 
     def draw_crosshair(self):
         """Отрисовка прицела"""
@@ -235,11 +355,8 @@ class GameWindow(QMainWindow):
         """)
         self.joystick_status_label.setFont(QFont("Arial", 10))
         self.joystick_status_label.move(20, 60)
-        self.joystick_status_label.resize(300, 100)  # Увеличиваем высоту для дополнительной информации
+        self.joystick_status_label.resize(330, 120)  # Увеличиваем высоту для дополнительной информации
         self.joystick_status_label.show()
-        
-        # Проверяем подключение джойстиков при инициализации
-        self._check_joystick_connection()
         
         # Запускаем таймер для обновления положения джойстиков
         self.joystick_timer.timeout.connect(self._update_joystick_status)
@@ -268,49 +385,119 @@ class GameWindow(QMainWindow):
     def _update_joystick_status(self):
         """Обновление статуса джойстиков"""
         try:
-            # Обновляем информацию о подключении
-            if not hasattr(self, 'joystick_connected') or not self.joystick_connected:
-                self._check_joystick_connection()
-            
             # Чтение состояния джойстиков
-            left_x, left_y = self._read_joystick_axis(0)  # Левый джойстик
-            right_x, right_y = self._read_joystick_axis(1)  # Правый джойстик
+            left_x, left_y = self._read_joystick_axis(0)
+            right_x, right_y = self._read_joystick_axis(1)
             
-            # Преобразование float в int для QPoint (масштабируем до 100)
+            # Преобразование координат
             self.left_joystick_pos = QPoint(int(left_x * 100), int(left_y * 100))
             self.right_joystick_pos = QPoint(int(right_x * 100), int(right_y * 100))
             
-            # Формируем текст статуса
-            connection_status = "Подключен" if self.joystick_connected else "Не подключен"
+            # Проверка состояния кнопки Options
+            if self.joystick:
+                options_pressed = self.joystick.get_button(self.options_button_id)
+                
+                # Если кнопка Options нажата
+                if options_pressed:
+                    if not self.menu_shown:
+                        self.menu_shown = True
+                        self.show_menu()
+                    else:
+                        # Если меню уже показано - закрываем его
+                        self.menu_shown = False
+                        if hasattr(self, 'options_menu'):
+                            self.options_menu.close()
+                else:
+                    # Обработка навигации по меню только если меню показано
+                    if self.menu_shown:
+                        self._handle_menu_navigation()
+            
+            # Обновление текста статуса
+            buttons_status = []
+            if self.joystick:
+                for i in range(min(4, self.joystick.get_numbuttons())):
+                    buttons_status.append(f"Кн{i+1}: {'Вкл' if self.joystick.get_button(i) else 'Выкл'}")
+            
             status_text = (f"Джойстик: {self.joystick_name}\n"
-                        f"Статус: {connection_status}\n"
                         f"Левый: X={left_x:.2f}, Y={left_y:.2f}\n"
-                        f"Правый: X={right_x:.2f}, Y={right_y:.2f}")
+                        f"Правый: X={right_x:.2f}, Y={right_y:.2f}\n"
+                        f"{' | '.join(buttons_status)}")
             
             self.joystick_status_label.setText(status_text)
             
         except Exception as e:
-            print(f"Ошибка чтения джойстиков: {e}")
-            self.joystick_status_label.setText("Ошибка чтения джойстиков")
+            print(f"Ошибка обновления статуса джойстика: {e}")
+            self.joystick_status_label.setText("Ошибка чтения джойстика")
+
+    def show_menu(self):
+        """Показать меню по кнопке Options"""
+        if not hasattr(self, 'options_menu'):
+            # Создаем меню при первом вызове
+            self.options_menu = QMenu(self)
+            
+            # Добавляем подменю "Фон"
+            bg_menu = self.options_menu.addMenu('Фон')
+            bg_menu.addAction(self._create_action('Статичный фон', self.set_static_background))
+            bg_menu.addAction(self._create_action('Локальная камера', self.set_camera_background))
+            bg_menu.addAction(self._create_action('BeagleBone Stream', self.set_beaglebone_stream))
+            
+            # Добавляем подменю "Управление"
+            control_menu = self.options_menu.addMenu('Управление')
+            self.control_group = QActionGroup(self)
+            
+            modes = [('Автоматический', "Автоматический"), ('Ручной', "Ручной")]
+            for text, mode in modes:
+                action = self._create_action(text, lambda checked, m=mode: self.set_control_mode(m), True)
+                self.control_group.addAction(action)
+                control_menu.addAction(action)
+                if mode == "Ручной":
+                    action.setChecked(True)
+            
+            # Добавляем пункт "Нейросеть"
+            self.options_menu.addAction(self._create_action("Распознать дефект", self.set_neural_network))
+        
+        # Показываем меню в центре экрана
+        menu_pos = self.mapToGlobal(self.rect().center())
+        menu_pos.setX(menu_pos.x() - self.options_menu.sizeHint().width() // 2)
+        menu_pos.setY(menu_pos.y() - self.options_menu.sizeHint().height() // 2)
+        
+        # Устанавливаем первый пункт меню активным
+        if self.options_menu.actions():
+            self.options_menu.setActiveAction(self.options_menu.actions()[0])
+        
+        self.options_menu.exec_(menu_pos)
+        self.menu_shown = False
 
     def _read_joystick_axis(self, joystick_num):
-        """Оптимизированное чтение джойстиков Steam Deck"""
+        """Чтение данных с джойстика через Pygame"""
         try:
-            if not hasattr(self, '_joystick'):
-                import pygame
-                pygame.init()
-                if pygame.joystick.get_count() > 0:
-                    self._joystick = pygame.joystick.Joystick(0)
-                    self._joystick.init()
+            if self.joystick is None:
+                self._init_joystick()
+                if self.joystick is None:
+                    return (0, 0)
             
-            if hasattr(self, '_joystick'):
-                if joystick_num == 0:  # Левый джойстик
-                    return (self._joystick.get_axis(0), -self._joystick.get_axis(1))
-                else:  # Правый джойстик
-                    return (self._joystick.get_axis(2), -self._joystick.get_axis(3))
+            # Обработка событий Pygame
+            pygame.event.pump()
+            
+            # Чтение осей (зависит от конфигурации джойстика)
+            if joystick_num == 0:  # Левый джойстик
+                axis_x = self.joystick.get_axis(0)
+                axis_y = self.joystick.get_axis(1)
+            else:  # Правый джойстик
+                axis_x = self.joystick.get_axis(3)  # Обычно ось 3 и 4 для правого джойстика
+                axis_y = self.joystick.get_axis(4)
+            
+            return (axis_x, axis_y)
+            
         except Exception as e:
-            print(f"Joystick error: {str(e)}")
-        return (0, 0)
+            print(f"Ошибка чтения джойстика: {e}")
+            self.joystick = None
+            return (0, 0)
+            
+        except Exception as e:
+            print(f"Ошибка чтения HID устройства: {e}")
+            self.hid_device = None
+            return (0, 0)
 
     def paintEvent(self, event):
         """Отрисовка положения джойстиков на экране"""
@@ -363,7 +550,7 @@ class GameWindow(QMainWindow):
         """Подключение к BeagleBone видеопотоку"""
         ip, ok = QInputDialog.getText(
             self, 'BeagleBone Stream', 'Введите IP адрес BeagleBone:', 
-            QLineEdit.Normal, '192.168.1.100'
+            QLineEdit.Normal, '192.168.1.17'
         )
         
         if ok and ip:
@@ -551,8 +738,15 @@ class GameWindow(QMainWindow):
             self.close()
 
     def closeEvent(self, event):
+        """Закрытие приложения"""
+        if hasattr(self, 'joystick') and self.joystick:
+            self.joystick.quit()
+        if hasattr(self, 'options_menu'):
+            self.options_menu.deleteLater()
+        pygame.quit()
         self._stop_camera()
         event.accept()
+
 
 if __name__ == '__main__':
     try:

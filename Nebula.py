@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QLabel, QMenuBar,
                              QInputDialog, QLineEdit, QMessageBox)
 from PyQt5.QtGui import QPixmap, QImage, QColor, QPainter, QPen, QIcon
 from PyQt5.QtCore import Qt, QTimer, QPointF
+from PyQt5.QtWidgets import QToolButton, QHBoxLayout
 
 # Настройки окружения для Steam Deck
 os.environ.update({
@@ -42,6 +43,32 @@ class GameWindow(QMainWindow):
         self._set_window_icon()
         self._apply_styles()
         
+        # Создаем кнопку закрытия
+        close_button = QToolButton()
+        close_button.setIcon(QIcon.fromTheme("window-close"))  # Системная иконка закрытия
+        close_button.setStyleSheet("""
+            QToolButton {
+                border: none;
+                padding: 5px;
+                icon-size: 20px;
+            }
+            QToolButton:hover {
+                background-color: #333;
+            }
+        """)
+        close_button.clicked.connect(self.close)
+        close_button.setToolTip("Закрыть приложение")
+        
+        # Создаем контейнер для кнопки
+        close_widget = QWidget()
+        close_layout = QHBoxLayout(close_widget)
+        close_layout.setContentsMargins(0, 0, 10, 0)  # Отступ справа
+        close_layout.addWidget(close_button)
+        
+        # Добавляем кнопку в правый верхний угол
+        self.menuBar().setCornerWidget(close_widget, Qt.TopRightCorner)
+        
+        # Остальная часть UI
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         self.layout = QVBoxLayout(central_widget)
@@ -80,6 +107,7 @@ class GameWindow(QMainWindow):
             QMenu { background-color: black; color: white; border: 1px solid #444; }
             QMenu::item:selected { background-color: #333; }
             QAction { color: white; }
+            QToolButton:hover { background-color: #333; }
         """)
 
     def _create_menu(self):
@@ -106,7 +134,7 @@ class GameWindow(QMainWindow):
         neural_action = self._create_action("Распознать дефект", self.set_neural_network)
         neural_network.addAction(neural_action)
         
-        menubar.addAction(self._create_action('Выход', self.close))
+        # menubar.addAction(self._create_action('Выход', self.close))
 
     def _create_action(self, text, callback, checkable=False):
         """Фабрика действий меню"""

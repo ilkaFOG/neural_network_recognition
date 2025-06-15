@@ -94,9 +94,9 @@ class GameWindow(QMainWindow):
         control_menu = menubar.addMenu('Управление')
         self.control_group = QActionGroup(self)
         
-        modes = [('Автоматически', "Автоматически"), ('Ручной', "Ручной")]
+        modes = [('Автоматический', "Автоматический"), ('Ручной', "Ручной")]
         for text, mode in modes:
-            action = self._create_action(text, lambda m=mode: self.set_control_mode(m), True)
+            action = self._create_action(text, lambda checked, m=mode: self.set_control_mode(m), True)
             self.control_group.addAction(action)
             control_menu.addAction(action)
             if mode == "Ручной":  # Выбираем ручной режим по умолчанию
@@ -118,6 +118,11 @@ class GameWindow(QMainWindow):
         """Установка режима управления"""
         self.control_mode = mode
         print(f"Режим управления изменён на: {mode}")
+        QMessageBox.information(
+            self,
+            "Режим управления",
+            f"Режим изменён на: {mode}"
+        )
 
     def draw_crosshair(self):
         """Отрисовка прицела"""

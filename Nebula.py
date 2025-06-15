@@ -4,15 +4,30 @@ import cv2
 import requests
 import datetime
 import torch
+import pygame
+import warnings
 from torchvision import transforms, models
 from PIL import Image
-from torch import nn  # Добавьте эту строку в секцию импортов
+from torch import nn
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QLabel, QMenuBar, 
                              QMenu, QAction, QVBoxLayout, QWidget, QActionGroup,
                              QInputDialog, QLineEdit, QMessageBox)
 from PyQt5.QtGui import QPixmap, QImage, QColor, QPainter, QPen, QIcon
 from PyQt5.QtCore import Qt, QTimer, QPointF
 from PyQt5.QtWidgets import QToolButton, QHBoxLayout
+from PyQt5.QtCore import QTimer, QPointF, QPoint
+from PyQt5.QtGui import QFont
+
+# Функция для очистки консоли
+def clear_console():
+    """Очищает консоль в зависимости от ОС"""
+    if os.name == 'nt':  # Windows
+        os.system('cls')
+    else:  # Linux/MacOS
+        os.system('clear')
+
+# Очищаем консоль при запуске
+clear_console()
 
 # Настройки окружения для Steam Deck
 os.environ.update({
@@ -23,7 +38,9 @@ os.environ.update({
 class GameWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.control_mode = "Ручной"  # Изменено на ручной режим по умолчанию
+        pygame.init()
+        pygame.joystick.init()  
+        self.control_mode = "Ручной"
         self.camera = None
         self.current_source = None
         self.timer = QTimer()
@@ -31,6 +48,17 @@ class GameWindow(QMainWindow):
         self._setup_ui()
         self._setup_connections()
         self._initialize_app()
+
+        self.joystick_timer = QTimer()
+        self.left_joystick_pos = QPoint(0, 0)
+        self.right_joystick_pos = QPoint(0, 0)
+        self._setup_joystick_display()
+
+        os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
+        os.environ["OPENCV_LOG_LEVEL"] = "ERROR"
+
+        warnings.filterwarnings("ignore", category=UserWarning, module="pkg_resources")
+        warnings.filterwarnings("ignore", module="pygame")
 
     # Конфигурация нейросети
     NUM_CLASSES = 3  # Количество классов дефектов
@@ -79,6 +107,13 @@ class GameWindow(QMainWindow):
         self.layout.addWidget(self.background_label)
         
         self._create_menu()
+
+        # Создаем отдельный QLabel для джойстиков поверх всех элементов
+        self.joystick_overlay = QLabel(self)
+        self.joystick_overlay.setAttribute(Qt.WA_TransparentForMouseEvents)  # Пропускает события мыши
+        self.joystick_overlay.resize(self.size())
+        self.joystick_overlay.move(0, 0)
+        self.joystick_overlay.show()
 
     def _setup_connections(self):
         """Настройка сигналов и слотов"""
@@ -173,8 +208,11 @@ class GameWindow(QMainWindow):
         self.crosshair_label.move(self.width()//2 - size//2, self.height()//2 - size//2)
 
     def resizeEvent(self, event):
+        """Обработка изменения размера окна"""
         super().resizeEvent(event)
         self.draw_crosshair()
+        if hasattr(self, 'joystick_overlay'):
+            self.joystick_overlay.resize(self.size())
 
     def set_static_background(self):
         """Установка статичного фона"""
@@ -183,6 +221,139 @@ class GameWindow(QMainWindow):
         pixmap.fill(QColor("#020061"))
         self.background_label.setPixmap(pixmap)
         self.draw_crosshair()
+
+    def _setup_joystick_display(self):
+        """Настройка отображения положения джойстиков"""
+        self.joystick_status_label = QLabel(self)
+        self.joystick_status_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                background-color: rgba(0, 0, 0, 150);
+                padding: 15px;
+                border-radius: 5px;
+            }
+        """)
+        self.joystick_status_label.setFont(QFont("Arial", 10))
+        self.joystick_status_label.move(20, 60)
+        self.joystick_status_label.resize(300, 100)  # Увеличиваем высоту для дополнительной информации
+        self.joystick_status_label.show()
+        
+        # Проверяем подключение джойстиков при инициализации
+        self._check_joystick_connection()
+        
+        # Запускаем таймер для обновления положения джойстиков
+        self.joystick_timer.timeout.connect(self._update_joystick_status)
+        self.joystick_timer.start(100)  # Обновлять каждые 100 мс
+
+    def _check_joystick_connection(self):
+        """Проверка подключения джойстиков"""
+        try:
+            pygame.joystick.init()
+            joystick_count = pygame.joystick.get_count()
+            
+            if joystick_count > 0:
+                self._joystick = pygame.joystick.Joystick(0)
+                self._joystick.init()
+                self.joystick_name = self._joystick.get_name()
+                self.joystick_connected = True
+            else:
+                self.joystick_name = "Не подключен"
+                self.joystick_connected = False
+                
+        except Exception as e:
+            print(f"Ошибка проверки джойстика: {e}")
+            self.joystick_name = "Ошибка подключения"
+            self.joystick_connected = False    
+
+    def _update_joystick_status(self):
+        """Обновление статуса джойстиков"""
+        try:
+            # Обновляем информацию о подключении
+            if not hasattr(self, 'joystick_connected') or not self.joystick_connected:
+                self._check_joystick_connection()
+            
+            # Чтение состояния джойстиков
+            left_x, left_y = self._read_joystick_axis(0)  # Левый джойстик
+            right_x, right_y = self._read_joystick_axis(1)  # Правый джойстик
+            
+            # Преобразование float в int для QPoint (масштабируем до 100)
+            self.left_joystick_pos = QPoint(int(left_x * 100), int(left_y * 100))
+            self.right_joystick_pos = QPoint(int(right_x * 100), int(right_y * 100))
+            
+            # Формируем текст статуса
+            connection_status = "Подключен" if self.joystick_connected else "Не подключен"
+            status_text = (f"Джойстик: {self.joystick_name}\n"
+                        f"Статус: {connection_status}\n"
+                        f"Левый: X={left_x:.2f}, Y={left_y:.2f}\n"
+                        f"Правый: X={right_x:.2f}, Y={right_y:.2f}")
+            
+            self.joystick_status_label.setText(status_text)
+            
+        except Exception as e:
+            print(f"Ошибка чтения джойстиков: {e}")
+            self.joystick_status_label.setText("Ошибка чтения джойстиков")
+
+    def _read_joystick_axis(self, joystick_num):
+        """Оптимизированное чтение джойстиков Steam Deck"""
+        try:
+            if not hasattr(self, '_joystick'):
+                import pygame
+                pygame.init()
+                if pygame.joystick.get_count() > 0:
+                    self._joystick = pygame.joystick.Joystick(0)
+                    self._joystick.init()
+            
+            if hasattr(self, '_joystick'):
+                if joystick_num == 0:  # Левый джойстик
+                    return (self._joystick.get_axis(0), -self._joystick.get_axis(1))
+                else:  # Правый джойстик
+                    return (self._joystick.get_axis(2), -self._joystick.get_axis(3))
+        except Exception as e:
+            print(f"Joystick error: {str(e)}")
+        return (0, 0)
+
+    def paintEvent(self, event):
+        """Отрисовка положения джойстиков на экране"""
+        super().paintEvent(event)
+        
+        # Создаем QPixmap для отрисовки джойстиков
+        overlay_pixmap = QPixmap(self.size())
+        overlay_pixmap.fill(Qt.transparent)
+        
+        painter = QPainter(overlay_pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        # Отрисовка левого джойстика
+        self._draw_joystick(painter, self.left_joystick_pos, QPoint(100, self.height() - 100), "Левый")
+        
+        # Отрисовка правого джойстика
+        self._draw_joystick(painter, self.right_joystick_pos, QPoint(self.width() - 100, self.height() - 100), "Правый")
+        
+        painter.end()
+        
+        # Устанавливаем pixmap в overlay label
+        self.joystick_overlay.setPixmap(overlay_pixmap)
+
+    def _draw_joystick(self, painter, position, center, label):
+        """Отрисовка одного джойстика"""
+        # Окружность основания
+        painter.setPen(QPen(Qt.white, 2))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(center, 30, 30)
+        
+        # Преобразуем координаты из диапазона [-100,100] в [-30,30]
+        dot_x = center.x() + position.x() * 30 / 100
+        dot_y = center.y() + position.y() * 30 / 100
+        dot_pos = QPoint(int(dot_x), int(dot_y))
+        
+        # Позиция джойстика
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(255, 0, 0, 250))
+        painter.drawEllipse(dot_pos, 10, 10)
+        
+        # Подпись
+        painter.setPen(Qt.white)
+        painter.drawText(center.x() - 30, center.y() + 50, label)
 
     def set_camera_background(self):
         """Запуск видеопотока с локальной камеры"""
@@ -385,6 +556,9 @@ class GameWindow(QMainWindow):
 
 if __name__ == '__main__':
     try:
+        # Очищаем консоль перед запуском приложения
+        clear_console()
+        
         app = QApplication(sys.argv)
         window = GameWindow()
         window.show()

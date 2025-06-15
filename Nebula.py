@@ -13,11 +13,10 @@ from torch import nn
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QLabel, QMenuBar, 
                              QMenu, QAction, QVBoxLayout, QWidget, QActionGroup,
                              QInputDialog, QLineEdit, QMessageBox)
-from PyQt5.QtGui import QPixmap, QImage, QColor, QPainter, QPen, QIcon
-from PyQt5.QtCore import Qt, QTimer, QPointF
+from PyQt5.QtGui import QPixmap, QImage, QColor, QPainter, QPen, QIcon, QFont, QKeyEvent
+from PyQt5.QtCore import Qt, QTimer, QPointF, QEvent, QPoint
 from PyQt5.QtWidgets import QToolButton, QHBoxLayout
-from PyQt5.QtCore import QTimer, QPointF, QPoint
-from PyQt5.QtGui import QFont
+
 
 # Функция для очистки консоли
 def clear_console():
@@ -360,7 +359,7 @@ class GameWindow(QMainWindow):
         
         # Запускаем таймер для обновления положения джойстиков
         self.joystick_timer.timeout.connect(self._update_joystick_status)
-        self.joystick_timer.start(100)  # Обновлять каждые 100 мс
+        self.joystick_timer.start(10)  # Обновлять каждые 100 мс
 
     def _check_joystick_connection(self):
         """Проверка подключения джойстиков"""
@@ -388,7 +387,13 @@ class GameWindow(QMainWindow):
             # Чтение состояния джойстиков
             left_x, left_y = self._read_joystick_axis(0)
             right_x, right_y = self._read_joystick_axis(1)
-            
+
+             # Проверка нажатия кнопки 0 (A) - имитация Enter
+            if self.joystick and self.joystick.get_button(0):
+                # Создаем событие нажатия Enter
+                enter_event = QKeyEvent(QEvent.KeyPress, Qt.Key_Enter, Qt.NoModifier)
+                QApplication.postEvent(self, enter_event)
+                
             # Преобразование координат
             self.left_joystick_pos = QPoint(int(left_x * 100), int(left_y * 100))
             self.right_joystick_pos = QPoint(int(right_x * 100), int(right_y * 100))

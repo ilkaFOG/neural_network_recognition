@@ -25,7 +25,7 @@ class DefectDetectionApp(QMainWindow):
         self.BATCH_SIZE = 32
         self.EPOCHS = 20
         self.LEARNING_RATE = 0.001
-        self.CLASS_NAMES = ["Норма", "Ржавчина", "Трещины", "Био-дефекты"]
+        self.CLASS_NAMES = ["Био-дефекты","Норма", "Ржавчина", "Трещины"]
         self.NUM_CLASSES = len(self.CLASS_NAMES)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         

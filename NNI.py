@@ -13,7 +13,7 @@ DATA_DIR = "data"  # Основная папка с данными
 BATCH_SIZE = 32
 EPOCHS = 20
 LEARNING_RATE = 0.001
-CLASS_NAMES = ["Ржавчина", "Трещины", "Био-дефекты"]  # Наши классы
+CLASS_NAMES = ["Норма","Ржавчина", "Трещины", "Био-дефекты"]  # Наши классы
 NUM_CLASSES = len(CLASS_NAMES)
 
 # Проверка доступности GPU

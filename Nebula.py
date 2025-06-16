@@ -7,16 +7,78 @@ import torch
 import pygame
 import warnings
 import hid
+import numpy as np
 from torchvision import transforms, models
 from PIL import Image
 from torch import nn
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QLabel, QMenuBar, 
                              QMenu, QAction, QVBoxLayout, QWidget, QActionGroup,
-                             QInputDialog, QLineEdit, QMessageBox)
+                             QInputDialog, QLineEdit, QMessageBox, QProgressDialog)
 from PyQt5.QtGui import QPixmap, QImage, QColor, QPainter, QPen, QIcon, QFont, QKeyEvent
-from PyQt5.QtCore import Qt, QTimer, QPointF, QEvent, QPoint
+from PyQt5.QtCore import Qt, QTimer, QPointF, QEvent, QPoint, QCoreApplication
 from PyQt5.QtWidgets import QToolButton, QHBoxLayout
 
+# Конфигурация нейросети
+CLASS_NAMES = ["Норма","Ржавчина", "Трещины", "Био-дефекты"]
+NUM_CLASSES = len(CLASS_NAMES)
+MODEL_PATH = "defect_detection_model.pth"
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+class DefectDetector:
+    def __init__(self):
+        self.model = self._load_model()
+        self.transform = transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        ])
+    
+    def _load_model(self):
+        """Загрузка предварительно обученной модели"""
+        model = models.resnet18(pretrained=False)
+        num_ftrs = model.fc.in_features
+        model.fc = nn.Linear(num_ftrs, NUM_CLASSES)
+        
+        if os.path.exists(MODEL_PATH):
+            try:
+                model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+                model = model.to(device)
+                model.eval()
+                print("Модель успешно загружена")
+                return model
+            except Exception as e:
+                print(f"Ошибка загрузки модели: {e}")
+                return None
+        return None
+    
+    def predict(self, image_path):
+        """Предсказание класса дефекта для изображения"""
+        if self.model is None:
+            return "Модель не загружена", 0.0
+        
+        try:
+            # Открываем изображение и конвертируем RGBA в RGB
+            image = Image.open(image_path)
+            if image.mode == 'RGBA':
+                background = Image.new('RGB', image.size, (255, 255, 255))
+                background.paste(image, mask=image.split()[-1])
+                image = background
+            elif image.mode != 'RGB':
+                image = image.convert('RGB')
+            
+            image = self.transform(image).unsqueeze(0).to(device)
+            
+            with torch.no_grad():
+                outputs = self.model(image)
+                probs = torch.nn.functional.softmax(outputs, dim=1)[0] * 100
+                _, predicted = torch.max(outputs, 1)
+                
+            return CLASS_NAMES[predicted[0]], probs[predicted[0]].item()
+        
+        except Exception as e:
+            print(f"Ошибка классификации: {e}")
+            return f"Ошибка: {str(e)}", 0.0
 
 # Функция для очистки консоли
 def clear_console():
@@ -72,9 +134,12 @@ class GameWindow(QMainWindow):
         self.last_hat_pos = (0, 0)  # Последнее положение HAT (крестовины)
         self.menu_navigation_enabled = False  # Флаг для навигации по меню
 
+        # Инициализация детектора дефектов
+        self.detector = DefectDetector()
+
     # Конфигурация нейросети
     NUM_CLASSES = 3  # Количество классов дефектов
-    CLASS_NAMES = ["Норма", "Трещина", "Коррозия"]  # Пример классификации
+    CLASS_NAMES = ["Ржавчина", "Трещины", "Био-дефекты"]  # Пример классификации
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def _handle_menu_navigation(self):
@@ -668,7 +733,7 @@ class GameWindow(QMainWindow):
             self._start_video_stream(self.current_source)
 
     def set_neural_network(self):
-        """Сделать снимок, сохранить его и классифицировать с помощью нейросети"""
+        """Сделать снимок и классифицировать с помощью нейросети"""
         if self.control_mode != "Ручной":
             QMessageBox.warning(
                 self, 
@@ -677,15 +742,25 @@ class GameWindow(QMainWindow):
             )
             return
             
+        # Создаем прогресс-диалог
+        progress = QProgressDialog("Выполняется классификация...", "Отмена", 0, 0, self)
+        progress.setWindowTitle("Распознавание дефектов")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setCancelButton(None)  # Убираем кнопку отмены
+        progress.show()
+        
+        # Обрабатываем события, чтобы диалог отобразился
+        QCoreApplication.processEvents()
+        
         try:
-            # Создаем папки если их нет
+            # Создаем папку для снимков если ее нет
             os.makedirs("Foto", exist_ok=True)
-            os.makedirs("data/train", exist_ok=True)
             
-            # Делаем снимок
+            # Генерируем имя файла с timestamp
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             filename = f"Foto/shot_{timestamp}.jpg"
             
+            # Получаем текущее изображение
             if self.camera and self.camera.isOpened():
                 ret, frame = self.camera.read()
                 if ret:
@@ -699,39 +774,31 @@ class GameWindow(QMainWindow):
                 else:
                     raise RuntimeError("Нет доступного изображения")
             
-            print(f"Изображение сохранено: {filename}")
+            # Выполняем классификацию
+            prediction, confidence = self.detector.predict(filename)
             
-            # Загружаем модель
-            model = models.resnet18(pretrained=False)
-            num_ftrs = model.fc.in_features
-            model.fc = nn.Linear(num_ftrs, self.NUM_CLASSES)
-            model.load_state_dict(torch.load("model_weights.pth"))
-            model.to(self.device)
-            model.eval()
+            # Закрываем прогресс-диалог
+            progress.close()
             
-            # Классифицируем изображение
-            transform = transforms.Compose([
-                transforms.Resize(256),
-                transforms.CenterCrop(224),
-                transforms.ToTensor(),
-                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-            ])
+            # Показываем результаты
+            result_msg = (f"<b>Результат классификации:</b><br><br>"
+                        f"<b>Изображение:</b> {os.path.basename(filename)}<br>"
+                        f"<b>Тип дефекта:</b> {prediction}<br>"
+                        f"<b>Уверенность:</b> {confidence:.2f}%")
             
-            image = Image.open(filename)
-            image = transform(image).unsqueeze(0).to(self.device)
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("Результат распознавания")
+            msg_box.setTextFormat(Qt.RichText)
+            msg_box.setText(result_msg)
             
-            with torch.no_grad():
-                outputs = model(image)
-                _, predicted = torch.max(outputs, 1)
-                prediction = self.CLASS_NAMES[predicted[0]]
+            # Добавляем изображение в сообщение
+            pixmap = QPixmap(filename).scaled(400, 300, Qt.KeepAspectRatio)
+            msg_box.setIconPixmap(pixmap)
             
-            QMessageBox.information(
-                self, 
-                "Результат классификации", 
-                f"Изображение: {filename}\nДефект: {prediction}"
-            )
+            msg_box.exec_()
             
         except Exception as e:
+            progress.close()
             QMessageBox.critical(
                 self, 
                 "Ошибка", 

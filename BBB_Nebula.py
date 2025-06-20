@@ -4,8 +4,12 @@ from flask import Flask, Response
 import time
 import logging
 from queue import Queue, Empty
+import os
 
-app = Flask(__name__)
+# Set the working directory to the script's directory
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
+app = Flask(__name__, instance_path=os.path.dirname(os.path.abspath(__file__)))
 
 class VideoStreamer:
     def __init__(self):
@@ -115,13 +119,15 @@ def status():
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     
-    if not video_streamer.start():
-        logging.error("Не удалось инициализировать камеру!")
-        exit(1)
-        
     try:
+        if not video_streamer.start():
+            logging.error("Не удалось инициализировать камеру!")
+            exit(1)
+            
         ip = open('/etc/hostname').read().strip()
         logging.info(f"Сервер запущен на http://{ip}:5000")
         app.run(host='0.0.0.0', port=5000, threaded=True)
+    except Exception as e:
+        logging.error(f"Fatal error: {str(e)}")
     finally:
         video_streamer.stop()
